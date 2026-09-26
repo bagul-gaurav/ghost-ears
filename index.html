@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1030">
+<title>Ghost Ears</title>
+<style>
+  :root { --bg: #0b1030; --card: #161d45; --line: #2a3470; --text: #e8e8f4; --muted: #9aa0c8; --accent: #f4ecc8; --bad: #f09595; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { max-width: 480px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 4px 0 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .status { font-size: 14px; color: var(--muted); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; flex: none; }
+  .dot.on { background: #7fd49a; }
+  button { font: inherit; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 10px;
+           padding: 10px 14px; min-height: 44px; user-select: none; touch-action: manipulation; }
+  button:active { transform: scale(0.97); }
+  button.on { background: var(--accent); color: #1c2458; border-color: var(--accent); }
+  .personas { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #talk { width: 100%; min-height: 72px; font-size: 18px; background: var(--accent); color: #1c2458; border: none; font-weight: 600; }
+  #talk.live { background: #7fd49a; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; font: inherit; font-size: 16px; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+          border-radius: 10px; padding: 10px 12px; }
+  .log { display: flex; flex-direction: column; gap: 8px; font-size: 15px; }
+  .log .heard { color: var(--muted); }
+  .log .said { color: var(--accent); }
+  .log .err { color: var(--bad); font-size: 13px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  .note { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ghost ears</h1>
+
+  <div class="card">
+    <div class="row"><span class="dot" id="dot"></span><span class="status" id="status">Badge not connected</span></div>
+    <div class="row" style="margin-top:10px"><button id="connect" style="flex:1">Connect badge</button></div>
+    <p class="note">Keep this page open with the screen on. Long-press the badge and it asks this phone to listen.</p>
+  </div>
+
+  <div class="card">
+    <label style="margin-top:0">Persona</label>
+    <div class="personas" id="personas"></div>
+  </div>
+
+  <button id="talk">Tap to talk</button>
+
+  <div class="card log" id="log"><span class="status">Nothing said yet.</span></div>
+
+  <details class="card">
+    <summary>Settings</summary>
+    <label>OpenRouter key (stays on this phone)</label>
+    <input type="password" id="apiKey" placeholder="sk-or-..." autocomplete="off">
+    <label>Model</label>
+    <input type="text" id="model" autocapitalize="off" spellcheck="false">
+    <label>Language for listening</label>
+    <input type="text" id="lang" placeholder="en-US">
+  </details>
+</main>
+
+<script src="brain.js"></script>
+<script>
+const { BLE, PERSONAS, DEFAULT_MODEL } = GhostBrain;
+const $ = id => document.getElementById(id);
+const store = {
+  get: k => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+};
+
+// --- Settings -----------------------------------------------------------------
+$('apiKey').value = store.get('ghost.key') || '';
+$('model').value  = store.get('ghost.model') || DEFAULT_MODEL;
+$('lang').value   = store.get('ghost.lang') || navigator.language || 'en-US';
+for (const id of ['apiKey', 'model', 'lang']) $(id).onchange = () => store.set('ghost.' + (id === 'apiKey' ? 'key' : id), $(id).value.trim());
+
+let persona = +(store.get('ghost.persona') || 0);
+const personaButtons = PERSONAS.map((p, i) => {
+  const b = document.createElement('button');
+  b.textContent = p.name;
+  b.onclick = () => { persona = i; store.set('ghost.persona', i); paintPersonas(); send('P' + i); };
+  $('personas').appendChild(b);
+  return b;
+});
+const paintPersonas = () => personaButtons.forEach((b, i) => b.classList.toggle('on', i === persona));
+paintPersonas();
+
+// --- Log ----------------------------------------------------------------------
+function log(cls, text) {
+  const log = $('log');
+  if (log.firstElementChild?.classList.contains('status')) log.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = cls; el.textContent = text;
+  log.prepend(el);
+  while (log.children.length > 12) log.lastChild.remove();
+}
+
+// --- Bluetooth ----------------------------------------------------------------
+let cmdChar = null;
+const encoder = new TextEncoder();
+
+async function send(cmd) {
+  if (!cmdChar) return;
+  try { await cmdChar.writeValueWithResponse(encoder.encode(cmd)); }
+  catch (e) { log('err', 'Could not reach the badge: ' + e.message); }
+}
+
+function setConnected(name) {
+  $('dot').classList.toggle('on', !!name);
+  $('status').textContent = name ? `Connected to ${name}` : 'Badge not connected';
+  $('connect').textContent = name ? 'Reconnect' : 'Connect badge';
+}
+
+$('connect').onclick = async () => {
+  if (!navigator.bluetooth) { log('err', 'This browser has no Web Bluetooth. Use Chrome on Android, over https.'); return; }
+  try {
+    const device = await navigator.bluetooth.requestDevice({ filters: [{ services: [BLE.SERVICE] }] });
+    device.addEventListener('gattserverdisconnected', () => { cmdChar = null; setConnected(null); });
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(BLE.SERVICE);
+    cmdChar = await service.getCharacteristic(BLE.CMD);
+    const events = await service.getCharacteristic(BLE.EVENT);
+    await events.startNotifications();
+    events.addEventListener('characteristicvaluechanged', e => {
+      if (new TextDecoder().decode(e.target.value) === 'L') listen('badge');
+    });
+    setConnected(device.name || 'badge');
+    send('P' + persona);
+    keepAwake();
+  } catch (e) {
+    if (e.name !== 'NotFoundError') log('err', e.message);   // NotFoundError = picker cancelled
+  }
+};
+
+// The mic stops when the screen sleeps, so ask it to stay on.
+let wakeLock = null;
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && cmdChar) keepAwake(); });
+
+// --- Listening -> OpenRouter -> badge -----------------------------------------
+const history = [];
+let listening = false;
+
+async function reply(heard) {
+  send('H');
+  log('heard', '“' + heard + '”');
+  const key = $('apiKey').value.trim();
+  if (!key) { log('err', 'Add your OpenRouter key in Settings.'); send('X'); return; }
+  try {
+    const r = await GhostBrain.ask({ key, model: $('model').value.trim(), personaIndex: persona, heard, history });
+    history.push({ heard, say: r.say, cycle: r.cycle });
+    if (history.length > 6) history.shift();
+    log('said', '👻 ' + r.say + '  (' + r.cycle + ')');
+    send('S' + r.cycle + '|' + r.say);
+  } catch (e) {
+    log('err', e.message);
+    send('X');
+  }
+}
+
+function listen(from) {
+  const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Rec) { log('err', 'No speech recognition in this browser. Use Chrome on Android.'); send('X'); return; }
+  if (listening) return;
+  const rec = new Rec();
+  rec.lang = $('lang').value.trim() || 'en-US';
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  let heard = '';
+  rec.onstart  = () => { if (from === 'phone') send('L'); listening = true; $('talk').classList.add('live'); $('talk').textContent = 'Listening…'; };
+  rec.onresult = e => { heard = e.results[0][0].transcript; };
+  rec.onerror  = e => { if (e.error !== 'no-speech' && e.error !== 'aborted') log('err', 'Mic: ' + e.error); };
+  rec.onend    = () => {
+    listening = false; $('talk').classList.remove('live'); $('talk').textContent = 'Tap to talk';
+    if (heard) reply(heard); else send('X');
+  };
+  try { rec.start(); }
+  catch (e) {
+    // Some browsers only open the mic from a tap on the page itself.
+    log('err', `Couldn't start the mic from the badge (${e.message}). Tap Talk instead.`);
+    navigator.vibrate?.(200);
+    send('X');
+  }
+}
+
+$('talk').onclick = () => listen('phone');
+</script>
+</body>
+</html>
