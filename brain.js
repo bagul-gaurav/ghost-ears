@@ -7,14 +7,19 @@
 // which works from a <script> tag, from file://, and from Node.
 
 (function (root) {
+  // voice: the preset voice (below) the persona starts with.
+  // tags: ElevenLabs v4 audio tags that suit it, offered to the model as examples.
   const PERSONAS = [
-    { id: 'shy', name: 'Shy',
+    { id: 'shy', name: 'Shy', voice: 'pFZP5JQG7iQjIQuC4Bku',
+      tags: ['whispers', 'giggles softly', 'nervously', 'gasps', 'sighs happily', 'bashful, tiny voice'],
       prompt: 'You are shy and sweet. You blush easily, speak softly, get flustered by compliments, ' +
               'and are secretly delighted anyone talks to you. Gentle, a little bashful, never mean.' },
-    { id: 'dramatic', name: 'Dramatic',
+    { id: 'dramatic', name: 'Dramatic', voice: 'N2lVS1w4EtoT3dr4eOWO',
+      tags: ['booming', 'gasps', 'dramatic pause', 'spooky echo', 'laughs maniacally', 'wails'],
       prompt: 'You are a dramatic, theatrical spooky ghost. Everything is a grand haunting. You say ' +
               'things like "BEHOLD" and "woooo", treat small things as epic, and are playful, never scary.' },
-    { id: 'sassy', name: 'Sassy',
+    { id: 'sassy', name: 'Sassy', voice: 'FGY2WhTYpPnrIDTdsKH5',
+      tags: ['scoffs', 'sarcastically', 'smirks', 'unimpressed', 'laughs', 'sing-song'],
       prompt: 'You are a sassy designer ghost haunting a design conference. You make cheeky jokes about ' +
               'kerning, Figma, auto layout, and pixel pushing. Witty and teasing but always friendly.' },
   ];
@@ -56,8 +61,12 @@
   function systemPrompt(persona) {
     return `${SETTING} ${persona.prompt}\n\n` +
       'Someone just said something to you (transcribed by speech recognition, so it may be garbled). ' +
-      'Reply ONLY with JSON: {"say": "...", "cycle": "..."}\n' +
+      'Reply ONLY with JSON: {"say": "...", "voice": "...", "cycle": "..."}\n' +
       `- "say": your reply, at most 8 words and ${MAX_SAY} characters. Plain ASCII: no emoji, no curly quotes.\n` +
+      '- "voice": the same words as "say", as an actor would perform them aloud. Add 1 or 2 audio tags in ' +
+      `square brackets where they fit, such as ${persona.tags.map(t => `[${t}]`).join(', ')}, or any short ` +
+      'delivery note like [excited, happy]. You may add a small sound ("hehe", "woooo", "ahem"), "..." for a ' +
+      'pause, and CAPS for emphasis. No new sentences.\n' +
       `- "cycle": the move you make while saying it, one of: ${REPLY_CYCLES.join(', ')}.\n` +
       '  giggle = happy/flattered, boo = playful scare, cower/vanish = scared or shy, jump = surprised, ' +
       'twirl = excited, peer = curious, look = thinking, yawn = bored, squish = poked or embarrassed, ' +
@@ -78,18 +87,24 @@
     return s;
   }
 
+  // The spoken line: no length limit to fit, but kept short and on one line.
+  const cleanVoice = s => String(s || '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+
   // The model is asked for JSON but may wrap it in prose or a code fence.
+  // voice is the line with audio tags for ElevenLabs; it falls back to say.
   function parseReply(text) {
-    let say = text, cycle = 'peer';
+    let say = text, voice = '', cycle = 'peer';
     const a = text.indexOf('{'), b = text.lastIndexOf('}');
     if (a >= 0 && b > a) {
       try {
         const j = JSON.parse(text.slice(a, b + 1));
         if (j.say) say = j.say;
+        if (j.voice) voice = j.voice;
         if (REPLY_CYCLES.includes(j.cycle)) cycle = j.cycle;
       } catch (e) { /* keep the raw text */ }
     }
-    return { say: cleanSay(say), cycle };
+    say = cleanSay(say);
+    return { say, voice: cleanVoice(voice) || say, cycle };
   }
 
   // Fast, cheap models that suit a quick quip; they head the model dropdown.
@@ -168,24 +183,44 @@
     const messages = [{ role: 'system', content: systemPrompt(persona) }];
     for (const h of history.slice(-3)) {
       messages.push({ role: 'user', content: h.heard });
-      messages.push({ role: 'assistant', content: JSON.stringify({ say: h.say, cycle: h.cycle || 'peer' }) });
+      messages.push({ role: 'assistant', content: JSON.stringify({ say: h.say, voice: h.voice || h.say, cycle: h.cycle || 'peer' }) });
     }
     messages.push({ role: 'user', content: heard });
     return parseReply(await chat({ key, model, messages }));
   }
 
   // --- Voice ---------------------------------------------------------------
-  // Replies can be spoken as well as shown. With an ElevenLabs key and voice
-  // it uses that voice; without one it falls back to the browser's own voice,
-  // pitched up. One voice for the ghost, but each persona delivers it
-  // differently: stability and style go to ElevenLabs, pitch and rate to the
-  // browser.
+  // Replies can be spoken as well as shown. Each persona has its own voice.
+  // With an ElevenLabs key it speaks the reply's "voice" line through Eleven
+  // v4 Turbo, which acts out the [audio tags] in it; without a key (or with
+  // "own voice" picked) it falls back to the browser's voice, pitched up,
+  // with the tags stripped. Stability goes to ElevenLabs (v4 takes 0, 0.5
+  // or 1: creative, natural, robust; lower acts the tags out more), pitch
+  // and rate to the browser.
   const VOICE_STYLE = [
-    { stability: 0.6,  style: 0.15, pitch: 1.8, rate: 0.95 },   // shy: soft and even
-    { stability: 0.3,  style: 0.7,  pitch: 1.5, rate: 0.9  },   // dramatic: big swings
-    { stability: 0.45, style: 0.45, pitch: 1.7, rate: 1.1  },   // sassy: quick
+    { stability: 0.5, pitch: 1.8, rate: 0.95 },   // shy: soft and even
+    { stability: 0,   pitch: 1.5, rate: 0.9  },   // dramatic: big swings
+    { stability: 0.5, pitch: 1.7, rate: 1.1  },   // sassy: quick
   ];
-  const ELEVEN_MODEL = 'eleven_flash_v2_5';   // the lowest-latency ElevenLabs model
+  const ELEVEN_MODEL = 'eleven_v4_turbo';   // follows audio tags, ~100 ms
+  // ElevenLabs' premade voices, which work with any key and need no Load.
+  // ElevenLabs retires these defaults on 2026-12-31; after that, Load your
+  // account's voices and pick replacements.
+  const PRESET_VOICES = [
+    { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily',      note: 'soft, warm, British' },
+    { id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica',   note: 'young, playful' },
+    { id: 'FGY2WhTYpPnrIDTdsKH5', name: 'Laura',     note: 'quirky, upbeat' },
+    { id: '9BWtsMINqrJLrRacOk9x', name: 'Aria',      note: 'expressive' },
+    { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah',     note: 'bright, confident' },
+    { id: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice',     note: 'clear, British' },
+    { id: 'XrExE9yKIg1WjnnlVkGX', name: 'Matilda',   note: 'friendly, warm' },
+    { id: 'SAz9YHcvj6GT2YYXdXww', name: 'River',     note: 'calm, neutral' },
+    { id: 'N2lVS1w4EtoT3dr4eOWO', name: 'Callum',    note: 'husky trickster' },
+    { id: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie',   note: 'casual, Australian' },
+    { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George',    note: 'warm storyteller' },
+    { id: 'bIHbv24MWmeRgasZH58o', name: 'Will',      note: 'chill, friendly' },
+  ];
+  const OWN_VOICE = 'own';   // the select value for the browser's own voice
   // Words in an ElevenLabs voice's name or labels that suggest a cute voice.
   const CUTE = /cute|child|kid|young|playful|animat|cartoon|sweet|squeak|high|girl|fairy|elf/i;
 
@@ -204,8 +239,56 @@
     }).sort((a, b) => b.cute - a.cute || a.name.localeCompare(b.name));
   }
 
+  // The voice pickers, one per persona, shared by the phone page and the
+  // simulator. Adds a <label> and <select> per persona to container. Each
+  // choice is kept in store as ghost.voice.<persona id>, with its name so an
+  // account voice still shows before Load. Returns
+  //   voiceId(i)       the persona's voice id, '' for the browser's own voice
+  //   load(elevenKey)  adds the account's voices; resolves to how many
+  function voicePicker(container, store, ownLabel) {
+    const option = (id, text) => { const o = document.createElement('option'); o.value = id; o.textContent = text; return o; };
+    const group = (label, voices) => {
+      const g = document.createElement('optgroup'); g.label = label;
+      for (const v of voices) g.appendChild(option(v.id, (v.cute ? '★ ' : '') + v.name + (v.note ? ' · ' + v.note : '')));
+      return g;
+    };
+    const selects = PERSONAS.map(p => {
+      const label = document.createElement('label'), sel = document.createElement('select');
+      label.textContent = p.name;
+      label.htmlFor = sel.id = 'voice-' + p.id;
+      sel.style.width = '100%';
+      sel.onchange = () => {
+        store.set('ghost.voice.' + p.id, sel.value);
+        store.set('ghost.voiceName.' + p.id, sel.selectedOptions[0]?.textContent || '');
+      };
+      container.append(label, sel);
+      return sel;
+    });
+    let account = [];
+    function fill() {
+      selects.forEach((sel, i) => {
+        const p = PERSONAS[i], chosen = sel.value || store.get('ghost.voice.' + p.id) || p.voice;
+        sel.innerHTML = '';
+        sel.append(option(OWN_VOICE, ownLabel), group('Presets', PRESET_VOICES));
+        if (account.length) sel.append(group('Your voices', account));
+        if (!sel.querySelector(`option[value="${CSS.escape(chosen)}"]`)) sel.append(option(chosen, store.get('ghost.voiceName.' + p.id) || 'Saved voice'));
+        sel.value = chosen;
+      });
+    }
+    fill();
+    return {
+      voiceId: i => (selects[i] && selects[i].value !== OWN_VOICE ? selects[i].value : ''),
+      async load(elevenKey) {
+        account = (await listVoices(elevenKey)).filter(v => !PRESET_VOICES.some(p => p.id === v.id));
+        fill();
+        return account.length;
+      },
+    };
+  }
+
   // Fetches the audio first and returns play(), so the bubble and the voice
   // can start together. play() resolves when it has finished (or was stopped).
+  // text may carry [audio tags]; ElevenLabs acts them out, the browser skips them.
   async function prepareVoice(text, { personaIndex = 0, elevenKey = '', voiceId = '' } = {}) {
     const st = VOICE_STYLE[personaIndex] || VOICE_STYLE[0];
     // A guard in case the end event never comes (it sometimes doesn't in Chrome).
@@ -217,7 +300,7 @@
         headers: { 'xi-api-key': elevenKey, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
         body: JSON.stringify({
           text, model_id: ELEVEN_MODEL,
-          voice_settings: { stability: st.stability, similarity_boost: 0.75, style: st.style, use_speaker_boost: true },
+          voice_settings: { stability: st.stability, similarity_boost: 0.75 },
         }),
       });
       if (!res.ok) throw new Error(`ElevenLabs ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -234,7 +317,7 @@
     const synth = root.speechSynthesis;
     if (!synth) throw new Error('This browser cannot speak. Add an ElevenLabs key.');
     return () => new Promise(resolve => {
-      const u = new SpeechSynthesisUtterance(text), t = guard(done);
+      const u = new SpeechSynthesisUtterance(text.replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim()), t = guard(done);
       function done() { clearTimeout(t); synth.cancel(); resolve(); }
       u.pitch = st.pitch; u.rate = st.rate;
       u.onend = u.onerror = done;
@@ -313,11 +396,11 @@
       try {
         const r = await ask({ key: s.key, model: s.model, personaIndex: s.personaIndex, heard, history });
         if (!active) return;
-        history.push({ heard, say: r.say, cycle: r.cycle });
+        history.push({ heard, say: r.say, voice: r.voice, cycle: r.cycle });
         if (history.length > 6) history.shift();
         let play = null;
         if (s.speak) {
-          try { play = await prepareVoice(r.say, s); }
+          try { play = await prepareVoice(r.voice, s); }
           catch (e) { hooks.error('Voice: ' + e.message); }   // still show the bubble
           if (!active) return;
         }
@@ -348,5 +431,5 @@
 
   root.GhostBrain = { PERSONAS, REPLY_CYCLES, MAX_SAY, DEFAULT_MODEL, BLE, SETTING, systemPrompt, cleanSay, parseReply, chat, ask,
                       SUGGESTED_MODELS, listModels, fillModelSelect,
-                      VOICE_STYLE, listVoices, prepareVoice, stopVoice, CONVO_SILENCE, sayTime, conversation };
+                      VOICE_STYLE, PRESET_VOICES, listVoices, voicePicker, prepareVoice, stopVoice, CONVO_SILENCE, sayTime, conversation };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

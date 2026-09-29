@@ -73,13 +73,12 @@
     <input type="text" id="lang" placeholder="en-US">
     <label>ElevenLabs key, for the voice (stays on this phone)</label>
     <input type="password" id="elevenKey" placeholder="optional: without it the phone's own voice is used" autocomplete="off">
-    <label>Voice</label>
-    <div class="row">
-      <select id="voice" style="flex:1"><option value="">Phone's own voice</option></select>
-      <button id="loadVoices">Load</button>
+    <div id="voices"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="testVoice" style="flex:1">Test voice</button>
+      <button id="loadVoices">Load my voices</button>
     </div>
-    <div class="row" style="margin-top:8px"><button id="testVoice" style="flex:1">Test voice</button></div>
-    <p class="note">Load lists your ElevenLabs voices, cute-sounding ones first (★).</p>
+    <p class="note">Each persona has its own voice. The presets work with any key; Load adds your account's voices, cute-sounding ones first (★). Replies are spoken with Eleven v4 Turbo, which acts out tags like [giggles] and [whispers].</p>
   </details>
 </main>
 
@@ -117,33 +116,18 @@ $('modeBubble').onclick = () => { speak = false; store.set('ghost.speak', '0'); 
 $('modeSpeech').onclick = () => { speak = true;  store.set('ghost.speak', '1'); paintMode(); };
 paintMode();
 
-// The chosen voice is kept by id and name, so it's there before Load is tapped.
-function addVoiceOption(id, name) {
-  const o = document.createElement('option');
-  o.value = id; o.textContent = name;
-  $('voice').appendChild(o);
-}
-if (store.get('ghost.voiceId')) addVoiceOption(store.get('ghost.voiceId'), store.get('ghost.voiceName') || 'Saved voice');
-$('voice').value = store.get('ghost.voiceId') || '';
-$('voice').onchange = () => {
-  store.set('ghost.voiceId', $('voice').value);
-  store.set('ghost.voiceName', $('voice').selectedOptions[0]?.textContent || '');
-};
+// A voice per persona.
+const voices = GhostBrain.voicePicker($('voices'), store, "Phone's own voice");
 $('loadVoices').onclick = async () => {
   const key = $('elevenKey').value.trim();
   if (!key) { log('err', 'Add your ElevenLabs key first.'); return; }
-  try {
-    const voices = await GhostBrain.listVoices(key), keep = $('voice').value;
-    $('voice').innerHTML = '<option value="">Phone\'s own voice</option>';
-    for (const v of voices) addVoiceOption(v.id, (v.cute ? '★ ' : '') + v.name + (v.note ? ' · ' + v.note : ''));
-    $('voice').value = voices.some(v => v.id === keep) ? keep : (voices.find(v => v.cute)?.id || '');
-    $('voice').onchange();
-    log('said', `Loaded ${voices.length} voices.`);
-  } catch (e) { log('err', e.message); }
+  try { log('said', `Loaded ${await voices.load(key)} of your voices.`); }
+  catch (e) { log('err', e.message); }
 };
-const voiceSettings = () => ({ personaIndex: persona, elevenKey: $('elevenKey').value.trim(), voiceId: $('voice').value });
+const voiceSettings = () => ({ personaIndex: persona, elevenKey: $('elevenKey').value.trim(), voiceId: voices.voiceId(persona) });
 $('testVoice').onclick = async () => {
-  const line = ['Oh! H-hi there...', 'BEHOLD! A ghost most grand!', 'Nice kerning. Did you do that?'][persona] || 'Boo!';
+  const line = ['[whispers] Oh! H-hi there... [giggles softly]', '[booming] BEHOLD! [dramatic pause] A ghost most grand!',
+                '[unimpressed] Nice kerning. [scoffs] Did you do that?'][persona] || 'Boo!';
   try { GhostBrain.stopVoice(); await (await GhostBrain.prepareVoice(line, voiceSettings()))(); }
   catch (e) { log('err', 'Voice: ' + e.message); }
 };
@@ -215,7 +199,7 @@ const convo = GhostBrain.conversation({
   thinking: heard => { send('H'); log('heard', '“' + heard + '”'); paintTalk('Thinking… tap to stop'); },
   say: r => {
     send('S' + r.cycle + '|' + r.say);
-    log('said', '👻 ' + r.say + '  (' + r.cycle + ')');
+    log('said', '👻 ' + (speak ? r.voice : r.say) + '  (' + r.cycle + ')');
     paintTalk(speak ? 'Speaking… tap to stop' : null);
   },
   // Some browsers only open the mic from a tap on the page itself; buzz so
