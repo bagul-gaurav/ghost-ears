@@ -294,6 +294,15 @@
     // A guard in case the end event never comes (it sometimes doesn't in Chrome).
     const guard = (resolve) => setTimeout(resolve, 4000 + 150 * text.length);
 
+    // A line that is only [tags] and emoji has nothing to say; ElevenLabs
+    // rejects it (400, "empty text"), so hold the bubble briefly in silence.
+    const words = text.replace(/\[[^\]]*\]/g, ' ').replace(/[^\p{L}\p{N}]/gu, '');
+    if (!words) return () => new Promise(resolve => {
+      const t = setTimeout(done, 1500);
+      function done() { clearTimeout(t); resolve(); }
+      playing = { stop: done };
+    });
+
     if (elevenKey && voiceId) {
       const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_64`, {
         method: 'POST',
