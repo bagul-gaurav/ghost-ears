@@ -22,6 +22,9 @@
   button:active { transform: scale(0.97); }
   button.on { background: var(--accent); color: #1c2458; border-color: var(--accent); }
   .personas { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .replies { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  select { width: 100%; min-width: 0; font: inherit; font-size: 16px; color: var(--text); background: var(--bg);
+           border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
   #talk { width: 100%; min-height: 72px; font-size: 18px; background: var(--accent); color: #1c2458; border: none; font-weight: 600; }
   #talk.live { background: #7fd49a; }
   label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
@@ -42,12 +45,17 @@
   <div class="card">
     <div class="row"><span class="dot" id="dot"></span><span class="status" id="status">Badge not connected</span></div>
     <div class="row" style="margin-top:10px"><button id="connect" style="flex:1">Connect badge</button></div>
-    <p class="note">Keep this page open with the screen on. Long-press the badge and it asks this phone to listen.</p>
+    <p class="note">Keep this page open with the screen on. Long-press the badge and it asks this phone to listen. It listens again after each reply, so you can talk back and forth. 8 s of quiet, a tap here, or another long-press ends it.</p>
   </div>
 
   <div class="card">
     <label style="margin-top:0">Persona</label>
     <div class="personas" id="personas"></div>
+    <label>Replies</label>
+    <div class="replies">
+      <button id="modeBubble">Bubble</button>
+      <button id="modeSpeech">Bubble + voice</button>
+    </div>
   </div>
 
   <button id="talk">Tap to talk</button>
@@ -59,9 +67,19 @@
     <label>OpenRouter key (stays on this phone)</label>
     <input type="password" id="apiKey" placeholder="sk-or-..." autocomplete="off">
     <label>Model</label>
-    <input type="text" id="model" autocapitalize="off" spellcheck="false">
+    <select id="model"></select>
+    <p class="note">Prices are dollars per million tokens, in/out. A reply uses about 500 in and 30 out.</p>
     <label>Language for listening</label>
     <input type="text" id="lang" placeholder="en-US">
+    <label>ElevenLabs key, for the voice (stays on this phone)</label>
+    <input type="password" id="elevenKey" placeholder="optional: without it the phone's own voice is used" autocomplete="off">
+    <label>Voice</label>
+    <div class="row">
+      <select id="voice" style="flex:1"><option value="">Phone's own voice</option></select>
+      <button id="loadVoices">Load</button>
+    </div>
+    <div class="row" style="margin-top:8px"><button id="testVoice" style="flex:1">Test voice</button></div>
+    <p class="note">Load lists your ElevenLabs voices, cute-sounding ones first (★).</p>
   </details>
 </main>
 
@@ -76,9 +94,10 @@ const store = {
 
 // --- Settings -----------------------------------------------------------------
 $('apiKey').value = store.get('ghost.key') || '';
-$('model').value  = store.get('ghost.model') || DEFAULT_MODEL;
+GhostBrain.fillModelSelect($('model'), store.get('ghost.model') || DEFAULT_MODEL);
 $('lang').value   = store.get('ghost.lang') || navigator.language || 'en-US';
-for (const id of ['apiKey', 'model', 'lang']) $(id).onchange = () => store.set('ghost.' + (id === 'apiKey' ? 'key' : id), $(id).value.trim());
+$('elevenKey').value = store.get('ghost.elevenKey') || '';
+for (const id of ['apiKey', 'model', 'lang', 'elevenKey']) $(id).onchange = () => store.set('ghost.' + (id === 'apiKey' ? 'key' : id), $(id).value.trim());
 
 let persona = +(store.get('ghost.persona') || 0);
 const personaButtons = PERSONAS.map((p, i) => {
@@ -90,6 +109,44 @@ const personaButtons = PERSONAS.map((p, i) => {
 });
 const paintPersonas = () => personaButtons.forEach((b, i) => b.classList.toggle('on', i === persona));
 paintPersonas();
+
+// Replies: a bubble on the badge, or the bubble and a voice from this phone.
+let speak = store.get('ghost.speak') === '1';
+const paintMode = () => { $('modeBubble').classList.toggle('on', !speak); $('modeSpeech').classList.toggle('on', speak); };
+$('modeBubble').onclick = () => { speak = false; store.set('ghost.speak', '0'); paintMode(); };
+$('modeSpeech').onclick = () => { speak = true;  store.set('ghost.speak', '1'); paintMode(); };
+paintMode();
+
+// The chosen voice is kept by id and name, so it's there before Load is tapped.
+function addVoiceOption(id, name) {
+  const o = document.createElement('option');
+  o.value = id; o.textContent = name;
+  $('voice').appendChild(o);
+}
+if (store.get('ghost.voiceId')) addVoiceOption(store.get('ghost.voiceId'), store.get('ghost.voiceName') || 'Saved voice');
+$('voice').value = store.get('ghost.voiceId') || '';
+$('voice').onchange = () => {
+  store.set('ghost.voiceId', $('voice').value);
+  store.set('ghost.voiceName', $('voice').selectedOptions[0]?.textContent || '');
+};
+$('loadVoices').onclick = async () => {
+  const key = $('elevenKey').value.trim();
+  if (!key) { log('err', 'Add your ElevenLabs key first.'); return; }
+  try {
+    const voices = await GhostBrain.listVoices(key), keep = $('voice').value;
+    $('voice').innerHTML = '<option value="">Phone\'s own voice</option>';
+    for (const v of voices) addVoiceOption(v.id, (v.cute ? '★ ' : '') + v.name + (v.note ? ' · ' + v.note : ''));
+    $('voice').value = voices.some(v => v.id === keep) ? keep : (voices.find(v => v.cute)?.id || '');
+    $('voice').onchange();
+    log('said', `Loaded ${voices.length} voices.`);
+  } catch (e) { log('err', e.message); }
+};
+const voiceSettings = () => ({ personaIndex: persona, elevenKey: $('elevenKey').value.trim(), voiceId: $('voice').value });
+$('testVoice').onclick = async () => {
+  const line = ['Oh! H-hi there...', 'BEHOLD! A ghost most grand!', 'Nice kerning. Did you do that?'][persona] || 'Boo!';
+  try { GhostBrain.stopVoice(); await (await GhostBrain.prepareVoice(line, voiceSettings()))(); }
+  catch (e) { log('err', 'Voice: ' + e.message); }
+};
 
 // --- Log ----------------------------------------------------------------------
 function log(cls, text) {
@@ -128,7 +185,7 @@ $('connect').onclick = async () => {
     const events = await service.getCharacteristic(BLE.EVENT);
     await events.startNotifications();
     events.addEventListener('characteristicvaluechanged', e => {
-      if (new TextDecoder().decode(e.target.value) === 'L') listen('badge');
+      if (new TextDecoder().decode(e.target.value) === 'L') toggleTalk();
     });
     setConnected(device.name || 'badge');
     send('P' + persona);
@@ -145,53 +202,36 @@ async function keepAwake() {
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && cmdChar) keepAwake(); });
 
-// --- Listening -> OpenRouter -> badge -----------------------------------------
-const history = [];
-let listening = false;
+// --- Conversation: listen -> OpenRouter -> badge, and round again -------------
+function paintTalk(text) {
+  $('talk').classList.toggle('live', convo.active);
+  $('talk').textContent = text || (convo.active ? 'Talking… tap to stop' : 'Tap to talk');
+}
 
-async function reply(heard) {
-  send('H');
-  log('heard', '“' + heard + '”');
-  const key = $('apiKey').value.trim();
-  if (!key) { log('err', 'Add your OpenRouter key in Settings.'); send('X'); return; }
-  try {
-    const r = await GhostBrain.ask({ key, model: $('model').value.trim(), personaIndex: persona, heard, history });
-    history.push({ heard, say: r.say, cycle: r.cycle });
-    if (history.length > 6) history.shift();
-    log('said', '👻 ' + r.say + '  (' + r.cycle + ')');
+const convo = GhostBrain.conversation({
+  settings: () => ({ key: $('apiKey').value.trim(), model: $('model').value.trim(), lang: $('lang').value.trim(),
+                     speak, ...voiceSettings() }),
+  listening: () => { send('L'); paintTalk('Listening… tap to stop'); },
+  thinking: heard => { send('H'); log('heard', '“' + heard + '”'); paintTalk('Thinking… tap to stop'); },
+  say: r => {
     send('S' + r.cycle + '|' + r.say);
-  } catch (e) {
-    log('err', e.message);
-    send('X');
-  }
-}
+    log('said', '👻 ' + r.say + '  (' + r.cycle + ')');
+    paintTalk(speak ? 'Speaking… tap to stop' : null);
+  },
+  // Some browsers only open the mic from a tap on the page itself; buzz so
+  // whoever holds the phone notices.
+  error: msg => { log('err', msg); navigator.vibrate?.(200); },
+  // Heard nothing at all, or failed: the ghost looks puzzled. Otherwise it
+  // goes back to idling.
+  end: why => { send(why === 'quiet' || why === 'error' ? 'X' : 'E'); paintTalk(); },
+});
 
-function listen(from) {
-  const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Rec) { log('err', 'No speech recognition in this browser. Use Chrome on Android.'); send('X'); return; }
-  if (listening) return;
-  const rec = new Rec();
-  rec.lang = $('lang').value.trim() || 'en-US';
-  rec.interimResults = false;
-  rec.maxAlternatives = 1;
-  let heard = '';
-  rec.onstart  = () => { if (from === 'phone') send('L'); listening = true; $('talk').classList.add('live'); $('talk').textContent = 'Listening…'; };
-  rec.onresult = e => { heard = e.results[0][0].transcript; };
-  rec.onerror  = e => { if (e.error !== 'no-speech' && e.error !== 'aborted') log('err', 'Mic: ' + e.error); };
-  rec.onend    = () => {
-    listening = false; $('talk').classList.remove('live'); $('talk').textContent = 'Tap to talk';
-    if (heard) reply(heard); else send('X');
-  };
-  try { rec.start(); }
-  catch (e) {
-    // Some browsers only open the mic from a tap on the page itself.
-    log('err', `Couldn't start the mic from the badge (${e.message}). Tap Talk instead.`);
-    navigator.vibrate?.(200);
-    send('X');
-  }
+// A tap here, or a long-press on the badge, starts a conversation or ends one.
+function toggleTalk() {
+  if (convo.active) convo.stop(); else convo.start();
+  paintTalk();
 }
-
-$('talk').onclick = () => listen('phone');
+$('talk').onclick = toggleTalk;
 </script>
 </body>
 </html>
